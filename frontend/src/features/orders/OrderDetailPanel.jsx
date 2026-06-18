@@ -36,6 +36,11 @@ export function OrderDetailPanel({
                 Backorder
               </span>
             )}
+            {sel.has_mixed_lot && (
+              <span data-testid="order-mixedlot-chip" className="rounded bg-[#F3E9FA] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-[#6B219A]">
+                Mixed Lot
+              </span>
+            )}
           </div>
         </div>
         <button className="icon-button" onClick={onClose}>
@@ -153,6 +158,37 @@ export function OrderDetailPanel({
             </div>
           ))}
         </div>
+
+        {/* Sub-fase 1.7 — Alokasi Stok (Lot & Gudang) + penjelasan (CLARITY) */}
+        {(sel.allocations || []).length > 0 && (
+          <div data-testid="order-allocation-panel" className="rounded-md border border-[#EFF0F2] overflow-hidden">
+            <div className="px-2.5 py-1.5 bg-[#FAFBFC] text-[10px] font-bold uppercase text-[#6B6B73] border-b border-[#EFF0F2] flex items-center justify-between gap-2">
+              <span>Alokasi Stok (Lot &amp; Gudang)</span>
+              {sel.allocation_policy?.lot_selection && (
+                <span className="text-[9px] font-semibold text-[#6B219A] normal-case lowercase">{sel.allocation_policy.lot_selection?.toUpperCase()} · {sel.allocation_policy.lot_mode}</span>
+              )}
+            </div>
+            {(sel.allocations || []).map((a, idx) => (
+              <div key={a.id || idx} data-testid={`order-alloc-${a.id || idx}`} className="px-2.5 py-1.5 border-b border-[#EFF0F2] last:border-0">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-[#1C1C1E] truncate">{a.warehouse_name}{a.warehouse_city ? ` · ${a.warehouse_city}` : ""}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${a.lot_mode === "mixed" ? "bg-[#F3E9FA] text-[#6B219A]" : "bg-[#EAF6EC] text-[#126E2C]"}`}>
+                      {a.lot_mode === "mixed" ? "Mixed Lot" : "Single Lot"}
+                    </span>
+                    <span className="text-[11px] font-semibold tabular-nums">{formatQty(a.quantity)}</span>
+                  </div>
+                </div>
+                {(a.lots || []).length > 0 && (
+                  <p className="text-[10px] text-[#6B6B73] mt-0.5">Lot: <span className="font-medium text-[#3C3C43]">{(a.lots || []).join(", ")}</span></p>
+                )}
+                {a.allocation_explanation && (
+                  <p data-testid={`order-alloc-explain-${a.id || idx}`} className="text-[10px] text-[#8E8E93] mt-0.5 italic">{a.allocation_explanation}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Ringkasan harga + pajak (Fase 1B) */}
         <div data-testid="order-pricing-breakdown" className="rounded-md border border-[#EFF0F2] bg-[#FAFBFC] p-2.5 space-y-1 text-[11.5px]">

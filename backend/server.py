@@ -19,7 +19,7 @@ from routers import (
     inventory, sales_orders, invoices, wms, documents, admin,
     reporting, audit, cycle_count, onboarding, label_printer, transfers,
     purchase_orders, inbound_receiving, outbound_picking,
-    entities, notifications, settings, price_approvals
+    entities, notifications, settings, price_approvals, pegging
 )
 
 
@@ -360,7 +360,7 @@ for module in [
     inventory, sales_orders, invoices, wms, documents, admin,
     reporting, audit, cycle_count, onboarding, label_printer, transfers,
     purchase_orders, inbound_receiving, outbound_picking,
-    entities, notifications, settings, price_approvals
+    entities, notifications, settings, price_approvals, pegging
 ]:
     app.include_router(module.router)
 

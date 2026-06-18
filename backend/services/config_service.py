@@ -37,6 +37,16 @@ DEFAULT_GLOBAL_SETTINGS: Dict[str, Any] = {
         "min_cut_qty": 0.5,
         "intercompany_transfer_required": True,  # KN_15 D-? — jual stok entitas lain wajib transfer
     },
+    # Sub-fase 1.7 — Allocation Policy (KN_15 §6.0) — CONFIGURABLE + CLARITY
+    "allocation": {
+        "mode": "auto",                                            # auto | assisted | manual
+        "priority_order": ["owner", "lot", "location", "roll_efficiency"],  # owner selalu HARD #1
+        "lot_mode": "prefer_single",                               # prefer_single | strict_single | allow_mixed
+        "lot_selection": "fefo",                                   # fefo | fifo | smallest_fit | largest_fit
+        "location_pref": "single_warehouse",                       # single_warehouse | nearest_customer | fewest_splits
+        "allow_intercompany": True,
+        "allow_partial": True,
+    },
 }
 
 DEFAULT_PAYMENT_TERMS: List[Dict[str, Any]] = [
@@ -263,3 +273,53 @@ def role_satisfies(actor_role: str, required_role: Optional[str]) -> bool:
     rank = {"sales": 1, "warehouse": 1, "manager": 2, "admin": 3}
     need = {"": 0, None: 0, "manager": 2, "admin": 3}.get(required_role or "", 2)
     return rank.get(actor_role, 0) >= need
+
+
+# ── Allocation Policy resolver (Sub-fase 1.7, KN_15 §6.0) ────────────────────
+# Hierarki override: order > customer > system-settings(default). OWNER selalu HARD #1.
+
+VALID_ALLOC = {
+    "mode": {"auto", "assisted", "manual"},
+    "lot_mode": {"prefer_single", "strict_single", "allow_mixed"},
+    "lot_selection": {"fefo", "fifo", "smallest_fit", "largest_fit"},
+    "location_pref": {"single_warehouse", "nearest_customer", "fewest_splits"},
+}
+
+
+def _sanitize_alloc(policy: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+    """Pastikan nilai enum valid; jika tidak, pakai base/default."""
+    out = dict(base)
+    for k, v in (policy or {}).items():
+        if k in VALID_ALLOC:
+            out[k] = v if v in VALID_ALLOC[k] else base.get(k)
+        elif k in ("allow_intercompany", "allow_partial"):
+            out[k] = bool(v)
+        elif k == "priority_order" and isinstance(v, list) and v:
+            # owner selalu #1 (HARD)
+            rest = [x for x in v if x in ("lot", "location", "roll_efficiency")]
+            out[k] = ["owner"] + [x for x in rest if x != "owner"]
+        elif k in out:
+            out[k] = v
+    return out
+
+
+async def get_allocation_policy(
+    entity_id: Optional[str] = None,
+    customer: Optional[Dict[str, Any]] = None,
+    order_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Effective allocation policy: system(global+entity) → customer.allocation_policy → order_overrides."""
+    s = await get_effective_settings(entity_id)
+    base = dict(DEFAULT_GLOBAL_SETTINGS["allocation"])
+    base = _sanitize_alloc(s.get("allocation", {}) or {}, base)
+    if customer and isinstance(customer.get("allocation_policy"), dict):
+        base = _sanitize_alloc(customer["allocation_policy"], base)
+    # Customer lot_policy (KN_15 R4) → peta ke lot_mode bila ada
+    cust_lot_policy = (customer or {}).get("lot_policy")
+    lot_policy_map = {"strict_single": "strict_single", "prefer_single": "prefer_single", "allow_mixed": "allow_mixed"}
+    if cust_lot_policy in lot_policy_map:
+        base["lot_mode"] = lot_policy_map[cust_lot_policy]
+    if order_overrides:
+        base = _sanitize_alloc(order_overrides, base)
+    return base
+

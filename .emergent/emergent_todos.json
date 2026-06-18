@@ -1,0 +1,26 @@
+[
+  {
+    "content": "Baseline + Fix 2 compliance FAILs — DONE",
+    "status": "completed"
+  },
+  {
+    "content": "Sub-fase 1.7 — Allocation policy R1/R2/R3/R4 configurable — DONE",
+    "status": "completed"
+  },
+  {
+    "content": "Mixed-lot confirmation UI — DONE (preview-lots endpoint + confirm_mixed_lot gate 409→confirm→200, CartPanel warning + MixedLotConfirmModal, verified in-browser)",
+    "status": "completed"
+  },
+  {
+    "content": "Pegging/earmarking: backend earmark endpoints + allocation respects earmark + invariant + frontend (inventory roll pegging UI + badge) + tests",
+    "status": "in_progress"
+  },
+  {
+    "content": "Pengiriman parsial fisik backorder (Surat Jalan porsi reserved + multi-shipment) + tests",
+    "status": "pending"
+  },
+  {
+    "content": "Final: full gate suite green + testing_agent_v3 end-to-end + update plan.md/SESSION_HANDOFF.md",
+    "status": "pending"
+  }
+]

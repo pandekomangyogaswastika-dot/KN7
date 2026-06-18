@@ -148,6 +148,7 @@ class SalesOrderCreate(BaseModel):
     order_discount_percent: float = 0     # Fase 1B — diskon level order (0–100%)
     payment_term_code: str = ""           # Fase 1B — term pembayaran (kode)
     allow_backorder: bool = False         # Sub-fase 1.6 — izinkan reservasi parsial + backorder
+    confirm_mixed_lot: bool = False       # Sub-fase 1.7/MixedLot — konfirmasi pemenuhan lintas-lot
 
 
 class AllocationPreviewItem(BaseModel):
@@ -294,6 +295,7 @@ class SettingsUpdate(BaseModel):
     finance: Optional[Dict[str, Any]] = None
     sales: Optional[Dict[str, Any]] = None
     inventory: Optional[Dict[str, Any]] = None
+    allocation: Optional[Dict[str, Any]] = None   # Sub-fase 1.7 — allocation policy
 
 
 class PaymentTermPayload(BaseModel):

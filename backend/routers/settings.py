@@ -15,7 +15,7 @@ from services.config_service import (
 )
 
 router = APIRouter(prefix="/api")
-SETTINGS_SECTIONS = ["tax", "finance", "sales", "inventory"]
+SETTINGS_SECTIONS = ["tax", "finance", "sales", "inventory", "allocation"]
 
 
 # ── Settings (global + per-entity override) ─────────────────────────────────

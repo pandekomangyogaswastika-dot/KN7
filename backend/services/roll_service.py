@@ -252,7 +252,7 @@ async def _reserve_single_roll(roll_id: str, order_id: str) -> Optional[Dict[str
     return await db.inventory_rolls.find_one_and_update(
         {"id": roll_id, "status": "available"},
         {"$set": {"status": "reserved", "reserved_ref": {"type": "sales_order", "id": order_id},
-                  "updated_at": now_iso()}},
+                  "earmarked_for": None, "updated_at": now_iso()}},
         projection={"_id": 0}, return_document=ReturnDocument.AFTER,
     )
 
@@ -274,6 +274,7 @@ async def _split_roll(roll: Dict[str, Any], take: float, order_id: str) -> Dict[
         "length_remaining": round(take, 2),
         "status": "reserved",
         "reserved_ref": {"type": "sales_order", "id": order_id},
+        "earmarked_for": None,
         "is_remnant": False,
         "created_at": now_iso(), "updated_at": now_iso(),
     })
@@ -281,56 +282,240 @@ async def _split_roll(roll: Dict[str, Any], take: float, order_id: str) -> Dict[
     return child
 
 
-async def allocate_and_reserve_rolls(
-    product_id: str, quantity: float, city: str, owner_entity_id: str, order_id: str,
-    allow_partial: bool = False,
-) -> List[Dict[str, Any]]:
-    """Reservasi roll owner-scoped untuk 1 baris order. Mengembalikan daftar alokasi
-    (per warehouse) yang kompatibel dengan struktur SO lama + info roll/lot.
+# ── Policy-aware allocation planner (Sub-fase 1.7, KN_15 §6) ─────────────────
 
-    Sub-fase 1.6 — Backorder:
-      - `allow_partial=False` (default): perilaku lama. Bila stok < quantity → 409.
-      - `allow_partial=True`: reservasi hanya sebesar stok yang TERSEDIA (tidak 409).
-        Bila stok 0 → kembalikan [] (full backorder). Caller menghitung
-        backorder_qty = quantity − Σ(allocations.quantity).
-    """
-    warehouses = {w["id"]: w for w in await db.warehouses.find({}, {"_id": 0}).to_list(100)}
-    priority = WAREHOUSE_PRIORITY.get(city, [city, "Jakarta", "Bandung", "Surabaya"])
+DEFAULT_ALLOCATION_POLICY: Dict[str, Any] = {
+    "mode": "auto",
+    "priority_order": ["owner", "lot", "location", "roll_efficiency"],
+    "lot_mode": "prefer_single",
+    "lot_selection": "fefo",
+    "location_pref": "single_warehouse",
+    "allow_intercompany": True,
+    "allow_partial": True,
+}
 
+
+async def _available_rolls_for_order(product_id: str, owner_entity_id: str, order_id: str,
+                                     customer_id: str = "") -> List[Dict[str, Any]]:
+    """Roll available owner-scoped untuk dialokasikan ke `order_id`/`customer_id`.
+    Menghormati EARMARK (pegging): roll yang di-earmark untuk demand LAIN dikecualikan;
+    roll yang di-earmark untuk order/customer ini tetap masuk (diprioritaskan planner)."""
     rolls = await db.inventory_rolls.find(
         {"product_id": product_id, "owner_entity_id": owner_entity_id, "status": "available",
          "length_remaining": {"$gt": 0}}, {"_id": 0},
     ).to_list(10000)
+    out = []
+    for r in rolls:
+        ear = r.get("earmarked_for")
+        if ear and isinstance(ear, dict):
+            etype, eid = ear.get("type"), ear.get("id")
+            if etype == "order" and eid and eid != order_id:
+                continue  # di-pegging untuk order lain
+            if etype == "customer" and eid and eid != customer_id:
+                continue  # di-pegging untuk customer lain
+        out.append(r)
+    return out
 
-    def wh_rank(wid: str) -> int:
+
+def _wh_rank_factory(warehouses: Dict[str, Any], city: str):
+    priority = WAREHOUSE_PRIORITY.get(city, [city, "Jakarta", "Bandung", "Surabaya"])
+
+    def rank(wid: str) -> int:
         c = warehouses.get(wid, {}).get("city", "")
         return priority.index(c) if c in priority else 99
+    return rank
 
-    # Urutkan: warehouse terdekat → lot tertua (FEFO via created_at) → roll besar dulu
-    rolls.sort(key=lambda r: (wh_rank(r["warehouse_id"]), r.get("created_at", ""),
-                              -float(r.get("length_remaining", 0))))
 
-    total_available = sum(float(r["length_remaining"]) for r in rolls)
-    if total_available + 0.01 < quantity:
-        if not allow_partial:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Stok milik entitas tidak mencukupi (tersedia {round(total_available,2)} dari {quantity}). "
-                       f"Aktifkan backorder untuk memesan sisa stok yang akan datang.",
-            )
-        # Backorder mode: reservasi hanya sebesar yang tersedia
-        effective_qty = round(total_available, 2)
+def _lot_age(rolls_in_lot: List[Dict[str, Any]]) -> str:
+    return min((r.get("created_at", "") for r in rolls_in_lot), default="")
+
+
+def _order_rolls_in_lot(rolls: List[Dict[str, Any]], wh_rank, location_pref: str) -> List[Dict[str, Any]]:
+    """Urutkan roll dalam satu lot: roll yang di-pegging (untuk demand ini) dulu →
+    location_pref → FEFO/roll-eff."""
+    def key(r):
+        earmarked_here = 0 if r.get("earmarked_for") else 1
+        if location_pref == "fewest_splits":
+            return (earmarked_here, -float(r["length_remaining"]), wh_rank(r["warehouse_id"]), r.get("created_at", ""))
+        # single_warehouse & nearest_customer → cluster gudang prioritas dulu, FEFO, roll besar dulu
+        return (earmarked_here, wh_rank(r["warehouse_id"]), r.get("created_at", ""), -float(r["length_remaining"]))
+    return sorted(rolls, key=key)
+
+
+def _lot_has_earmark(rolls_in_lot: List[Dict[str, Any]]) -> bool:
+    return any(r.get("earmarked_for") for r in rolls_in_lot)
+
+
+def _order_lots(lots: List[str], by_lot: Dict[str, List[Dict[str, Any]]],
+                per_lot_available: Dict[str, float], lot_selection: str) -> List[str]:
+    # Lot yang berisi roll di-pegging (untuk demand ini) selalu didahulukan.
+    def peg_key(l):
+        return 0 if _lot_has_earmark(by_lot[l]) else 1
+    if lot_selection == "smallest_fit":
+        return sorted(lots, key=lambda l: (peg_key(l), per_lot_available[l]))
+    if lot_selection == "largest_fit":
+        return sorted(lots, key=lambda l: (peg_key(l), -per_lot_available[l]))
+    return sorted(lots, key=lambda l: (peg_key(l), _lot_age(by_lot[l])))  # fefo/fifo → lot tertua dulu
+
+
+def _select_single_lot(lots_enough: List[str], by_lot, per_lot_available, lot_selection: str) -> str:
+    # Bila ada lot pegged yang cukup, pilih dari situ dulu (pegging customer pakai stok-nya).
+    pegged = [l for l in lots_enough if _lot_has_earmark(by_lot[l])]
+    pool = pegged or lots_enough
+    if lot_selection == "smallest_fit":
+        return min(pool, key=lambda l: per_lot_available[l])
+    if lot_selection == "largest_fit":
+        return max(pool, key=lambda l: per_lot_available[l])
+    return min(pool, key=lambda l: _lot_age(by_lot[l]))  # fefo/fifo
+
+
+def _build_allocation_plan(rolls: List[Dict[str, Any]], quantity: float, city: str,
+                           warehouses: Dict[str, Any], policy: Dict[str, Any],
+                           order_id: str = "") -> Dict[str, Any]:
+    """READ-ONLY: hasilkan urutan roll (`ordered_rolls`) + meta lot untuk 1 baris.
+    Menerapkan R1/R2/R3/R4 + location_pref. Tidak memutasi DB."""
+    lot_mode = policy.get("lot_mode", "prefer_single")
+    lot_selection = policy.get("lot_selection", "fefo")
+    location_pref = policy.get("location_pref", "single_warehouse")
+    wh_rank = _wh_rank_factory(warehouses, city)
+
+    by_lot: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rolls:
+        by_lot.setdefault(r.get("lot") or "—", []).append(r)
+    per_lot_available = {lot: round(sum(float(x["length_remaining"]) for x in rs), 2)
+                         for lot, rs in by_lot.items()}
+    total_available = round(sum(per_lot_available.values()), 2)
+    Q = round(float(quantity), 2)
+
+    base = {"total_available": total_available, "lot_selection": lot_selection,
+            "lot_mode_policy": lot_mode, "ordered_rolls": []}
+    if Q <= 0.01 or total_available <= 0.01:
+        return {**base, "reserved_qty": 0.0, "backorder_qty": round(max(Q, 0), 2),
+                "lot_mode": "single", "lots_used": [], "requires_confirmation": False,
+                "explanation": "Tidak ada stok tersedia." if total_available <= 0.01 else "Qty nol."}
+
+    lots_enough = [lot for lot in by_lot if per_lot_available[lot] + 0.01 >= Q]
+    ordered_rolls: List[Dict[str, Any]] = []
+
+    if lots_enough:
+        lot = _select_single_lot(lots_enough, by_lot, per_lot_available, lot_selection)
+        ordered_rolls = _order_rolls_in_lot(by_lot[lot], wh_rank, location_pref)
+        reason = f"Lot tunggal {lot} cukup (kebijakan {lot_selection.upper()})."
+    elif lot_mode == "strict_single":
+        best = max(by_lot, key=lambda l: per_lot_available[l])
+        ordered_rolls = _order_rolls_in_lot(by_lot[best], wh_rank, location_pref)
+        reason = (f"Kebijakan strict_single: hanya lot tunggal terbesar {best} "
+                  f"({per_lot_available[best]}); sisa → backorder/shipment terpisah.")
     else:
-        effective_qty = quantity
+        lots_ordered = _order_lots(list(by_lot.keys()), by_lot, per_lot_available, lot_selection)
+        for lot in lots_ordered:
+            ordered_rolls.extend(_order_rolls_in_lot(by_lot[lot], wh_rank, location_pref))
+        reason = "Qty melebihi lot tunggal terbesar → pemenuhan lintas-lot (mixed)."
 
+    # Simulasi konsumsi untuk tahu lot AKTUAL & qty terpenuhi (tanpa mutasi)
+    effective = min(Q, total_available)
+    consumed = 0.0
+    lots_used: List[str] = []
+    for r in ordered_rolls:
+        if consumed + 0.01 >= effective:
+            break
+        rlen = float(r["length_remaining"])
+        take = min(rlen, round(effective - consumed, 2))
+        if take <= 0.01:
+            continue
+        consumed = round(consumed + take, 2)
+        lt = r.get("lot") or "—"
+        if lt not in lots_used:
+            lots_used.append(lt)
+
+    actual_lot_mode = "single" if len(lots_used) <= 1 else "mixed"
+    requires_confirmation = (lot_mode == "prefer_single" and actual_lot_mode == "mixed")
+    backorder = round(max(Q - consumed, 0.0), 2)
+    if backorder > 0.01 and "backorder" not in reason:
+        reason += f" Sisa {backorder} → backorder."
+    if actual_lot_mode == "mixed":
+        reason += f" Lot dipakai: {', '.join(lots_used)}."
+    return {**base, "ordered_rolls": ordered_rolls, "reserved_qty": round(consumed, 2),
+            "backorder_qty": backorder, "lot_mode": actual_lot_mode, "lots_used": lots_used,
+            "requires_confirmation": requires_confirmation, "explanation": reason}
+
+
+def _explain_allocation(qty: float, lots: List[str], wh: Dict[str, Any], owner: str,
+                        order_lot_mode: str, policy: Dict[str, Any], plan: Dict[str, Any]) -> str:
+    """CLARITY (KN_15 §6.0): kalimat penjelasan per sub-alokasi (per warehouse)."""
+    lot_txt = lots[0] if len(lots) == 1 else (" + ".join(lots) if lots else "—")
+    sel = policy.get("lot_selection", "fefo").upper()
+    wh_name = wh.get("name", wh.get("id", "Gudang"))
+    if len(lots) > 1:
+        base = f"{qty} dari Lot {lot_txt} ({sel}) · {wh_name} — lintas-lot di gudang ini."
+    else:
+        base = f"{qty} dari Lot {lot_txt} ({sel}) · {wh_name} — lot tunggal."
+    if order_lot_mode == "mixed" and len(lots) <= 1:
+        base += " Bagian dari pemenuhan lintas-lot (baris mixed)."
+    return base
+
+
+async def preview_line_allocation(product_id: str, quantity: float, city: str,
+                                  owner_entity_id: str, policy: Dict[str, Any],
+                                  order_id: str = "", customer_id: str = "") -> Dict[str, Any]:
+    """READ-ONLY: rencana alokasi 1 baris (tanpa reservasi) — untuk preview & konfirmasi mixed-lot."""
+    warehouses = {w["id"]: w for w in await db.warehouses.find({}, {"_id": 0}).to_list(100)}
+    rolls = await _available_rolls_for_order(product_id, owner_entity_id, order_id, customer_id)
+    pol = {**DEFAULT_ALLOCATION_POLICY, **(policy or {})}
+    plan = _build_allocation_plan(rolls, quantity, city, warehouses, pol, order_id)
+    return {
+        "product_id": product_id,
+        "requested_qty": round(float(quantity), 2),
+        "reserved_qty": plan["reserved_qty"],
+        "backorder_qty": plan["backorder_qty"],
+        "lot_mode": plan["lot_mode"],
+        "lots_used": plan["lots_used"],
+        "requires_confirmation": plan["requires_confirmation"],
+        "explanation": plan["explanation"],
+        "total_available": plan["total_available"],
+        "lot_selection": pol["lot_selection"],
+        "lot_mode_policy": pol["lot_mode"],
+    }
+
+
+async def allocate_and_reserve_rolls(
+    product_id: str, quantity: float, city: str, owner_entity_id: str, order_id: str,
+    allow_partial: bool = False, policy: Optional[Dict[str, Any]] = None, customer_id: str = "",
+) -> List[Dict[str, Any]]:
+    """Reservasi roll owner-scoped untuk 1 baris order — POLICY-AWARE (Sub-fase 1.7).
+
+    Menerapkan KN_15 §6 (R1 single-lot preference, R2 mixed-lot exception, R3 lot
+    selection fefo/fifo/smallest/largest, R4 lot_mode prefer_single/strict_single/
+    allow_mixed) + location_pref. Mengembalikan daftar alokasi per warehouse
+    (kompatibel struktur SO lama) + `lot_mode` & `allocation_explanation` (CLARITY).
+
+    Sub-fase 1.6 — Backorder:
+      - `allow_partial=False` (default): bila stok < quantity → 409.
+      - `allow_partial=True`: reservasi hanya sebesar stok TERSEDIA; sisa = backorder.
+    """
+    pol = {**DEFAULT_ALLOCATION_POLICY, **(policy or {})}
+    warehouses = {w["id"]: w for w in await db.warehouses.find({}, {"_id": 0}).to_list(100)}
+
+    rolls = await _available_rolls_for_order(product_id, owner_entity_id, order_id, customer_id)
+    plan = _build_allocation_plan(rolls, quantity, city, warehouses, pol)
+    total_available = plan["total_available"]
+
+    if total_available + 0.01 < quantity and not allow_partial:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Stok milik entitas tidak mencukupi (tersedia {round(total_available,2)} dari {quantity}). "
+                   f"Aktifkan backorder untuk memesan sisa stok yang akan datang.",
+        )
+
+    effective_qty = round(min(quantity, total_available), 2)
     if effective_qty <= 0.01:
-        # Tidak ada stok sama sekali → full backorder (caller yang catat)
-        return []
+        return []  # full backorder (caller catat)
 
     remaining = effective_qty
     per_wh: Dict[str, Dict[str, Any]] = {}
 
-    for roll in rolls:
+    # Reservasi mengikuti URUTAN dari planner (R1/R2/R3 + location_pref).
+    for roll in plan["ordered_rolls"]:
         if remaining <= 0.01:
             break
         rlen = float(roll["length_remaining"])
@@ -347,7 +532,6 @@ async def allocate_and_reserve_rolls(
             bucket["qty"] += take
             remaining -= take
         else:
-            # roll lebih besar dari kebutuhan → split
             child = await _split_roll(roll, remaining, order_id)
             bucket["rolls"].append({"roll_id": child["id"], "roll_no": child.get("roll_no"),
                                     "lot": child.get("lot"), "length": float(child["length_remaining"])})
@@ -356,18 +540,20 @@ async def allocate_and_reserve_rolls(
             remaining = 0.0
             break
 
-    if remaining > 0.01:
-        if not allow_partial:
-            # gagal mereservasi cukup (race) → rollback lalu error
-            await release_order_rolls(order_id)
-            raise HTTPException(status_code=409, detail="Stok berubah saat reservasi. Silakan refresh katalog.")
-        # Mode backorder: terima reservasi parsial apa adanya (sisa jadi backorder).
-        # Bila tak ada satu pun roll yang ter-reserve → tidak ada alokasi.
+    if remaining > 0.01 and not allow_partial:
+        await release_order_rolls(order_id)
+        raise HTTPException(status_code=409, detail="Stok berubah saat reservasi. Silakan refresh katalog.")
+
+    # Lot mode aktual = gabungan lot lintas-warehouse (mixed bila >1 lot dipakai)
+    all_lots = sorted({lot for info in per_wh.values() for lot in info["lots"] if lot})
+    order_lot_mode = "single" if len(all_lots) <= 1 else "mixed"
 
     allocations: List[Dict[str, Any]] = []
     for wid, info in per_wh.items():
         wh = warehouses.get(wid, {})
         lots = sorted(x for x in info["lots"] if x)
+        explanation = _explain_allocation(round(info["qty"], 2), lots, wh, owner_entity_id,
+                                          order_lot_mode, pol, plan)
         allocations.append({
             "id": new_id("alloc"),
             "product_id": product_id,
@@ -379,10 +565,11 @@ async def allocate_and_reserve_rolls(
             "lot": lots[0] if len(lots) == 1 else None,
             "lots": lots,
             "lot_mode": "single" if len(lots) <= 1 else "mixed",
+            "allocation_explanation": explanation,
+            "policy_lot_selection": pol["lot_selection"],
             "rolls": info["rolls"],
             "status": "allocated",
         })
-        # ledger movement per warehouse
         await db.inventory_movements.insert_one({
             "id": new_id("mov"), "product_id": product_id, "warehouse_id": wid,
             "owner_entity_id": owner_entity_id, "movement_type": "reservation",

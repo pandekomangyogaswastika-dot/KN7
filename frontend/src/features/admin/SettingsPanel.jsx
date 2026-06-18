@@ -59,6 +59,7 @@ export default function SettingsPanel({ entities = [] }) {
         scope: "global",
         tax: settings.tax, finance: settings.finance,
         sales: settings.sales, inventory: settings.inventory,
+        allocation: settings.allocation,
       });
       flash("Pengaturan tersimpan");
     } catch (e) { alert(e.response?.data?.detail || "Gagal simpan"); }
@@ -105,7 +106,7 @@ export default function SettingsPanel({ entities = [] }) {
     return <div data-testid="settings-panel" className="section-card"><div className="section-body text-[12px] text-[#6B6B73]">Memuat pengaturan…</div></div>;
   }
 
-  const tax = settings.tax || {}, fin = settings.finance || {}, sal = settings.sales || {}, inv = settings.inventory || {};
+  const tax = settings.tax || {}, fin = settings.finance || {}, sal = settings.sales || {}, inv = settings.inventory || {}, alloc = settings.allocation || {};
 
   return (
     <div data-testid="settings-panel" className="flex flex-col gap-3">
@@ -186,6 +187,51 @@ export default function SettingsPanel({ entities = [] }) {
               <Field label="UOM Default"><input data-testid="settings-default-uom" className="field" value={inv.default_uom || "meter"} onChange={(e) => setSection("inventory", "default_uom", e.target.value)} /></Field>
               <Field label="Minimum Potong (qty)"><input type="number" data-testid="settings-mincut" className="field tabular-nums" value={inv.min_cut_qty ?? 0.5} onChange={(e) => setSection("inventory", "min_cut_qty", parseFloat(e.target.value) || 0)} /></Field>
               <Toggle label="Transfer antar-entitas wajib sebelum jual stok entitas lain" testid="settings-ic-transfer" checked={!!inv.intercompany_transfer_required} onChange={(v) => setSection("inventory", "intercompany_transfer_required", v)} />
+            </div>
+          </div>
+
+          {/* Alokasi Stok (Sub-fase 1.7 — Allocation Policy R1/R2 configurable) */}
+          <div className="section-card md:col-span-2">
+            <div className="section-head"><div className="flex items-center gap-2"><Boxes size={15} className="text-[#6B219A]" /><h2>Alokasi Stok (Lot &amp; Lokasi)</h2></div></div>
+            <div className="section-body grid gap-2.5 md:grid-cols-3">
+              <Field label="Mode Alokasi">
+                <select data-testid="settings-alloc-mode" className="field" value={alloc.mode || "auto"}
+                  onChange={(e) => setSection("allocation", "mode", e.target.value)}>
+                  <option value="auto">Auto — sistem putuskan</option>
+                  <option value="assisted">Assisted — usul + boleh edit</option>
+                  <option value="manual">Manual — user pilih</option>
+                </select>
+              </Field>
+              <Field label="Kebijakan Lot (R4)">
+                <select data-testid="settings-alloc-lotmode" className="field" value={alloc.lot_mode || "prefer_single"}
+                  onChange={(e) => setSection("allocation", "lot_mode", e.target.value)}>
+                  <option value="prefer_single">Prefer Single — utamakan 1 lot (konfirmasi bila campur)</option>
+                  <option value="strict_single">Strict Single — tidak boleh campur</option>
+                  <option value="allow_mixed">Allow Mixed — boleh campur tanpa konfirmasi</option>
+                </select>
+              </Field>
+              <Field label="Pemilihan Lot (R3)">
+                <select data-testid="settings-alloc-lotselect" className="field" value={alloc.lot_selection || "fefo"}
+                  onChange={(e) => setSection("allocation", "lot_selection", e.target.value)}>
+                  <option value="fefo">FEFO — lot tertua dulu</option>
+                  <option value="fifo">FIFO — masuk pertama dulu</option>
+                  <option value="smallest_fit">Smallest Fit — habiskan lot kecil</option>
+                  <option value="largest_fit">Largest Fit — lot terbesar dulu</option>
+                </select>
+              </Field>
+              <Field label="Preferensi Lokasi">
+                <select data-testid="settings-alloc-location" className="field" value={alloc.location_pref || "single_warehouse"}
+                  onChange={(e) => setSection("allocation", "location_pref", e.target.value)}>
+                  <option value="single_warehouse">Satu Gudang — minim split</option>
+                  <option value="nearest_customer">Terdekat Customer</option>
+                  <option value="fewest_splits">Paling Sedikit Potongan</option>
+                </select>
+              </Field>
+              <Toggle label="Izinkan sumber inter-company (transfer)" testid="settings-alloc-intercompany"
+                checked={alloc.allow_intercompany !== false} onChange={(v) => setSection("allocation", "allow_intercompany", v)} />
+              <Toggle label="Izinkan pemenuhan parsial + backorder" testid="settings-alloc-partial"
+                checked={alloc.allow_partial !== false} onChange={(v) => setSection("allocation", "allow_partial", v)} />
+              <p className="md:col-span-3 text-[10.5px] text-[#8E8E93]">Owner (entitas penjual) selalu prioritas #1 (HARD). Kebijakan ini menjadi default sistem; dapat di-override per customer/order. Hasil alokasi selalu disertai penjelasan (clarity) di detail order.</p>
             </div>
           </div>
 

@@ -175,6 +175,7 @@ export function useAppActions(state) {
         order_discount_percent: Number(extra.order_discount_percent || 0),
         payment_term_code: extra.payment_term_code || "",
         allow_backorder: Boolean(extra.allow_backorder),
+        confirm_mixed_lot: Boolean(extra.confirm_mixed_lot),
         items: cart.map((item) => {
           const sp = (extra.special_prices || {})[item.product.id];
           return {
@@ -192,7 +193,13 @@ export function useAppActions(state) {
       setActiveView("orders");
       await loadAll();
     } catch (error) {
-      setNotice(error.response?.data?.detail || "Gagal membuat order/reservasi.");
+      const detail = error.response?.data?.detail;
+      // Sub-fase 1.7 — 409 mixed-lot terstruktur (detail object). UI dialog menangani konfirmasi;
+      // pesan fallback bila sampai ke sini tanpa konfirmasi.
+      const msg = typeof detail === "object" && detail
+        ? (detail.message || "Pesanan butuh konfirmasi lintas-lot.")
+        : (detail || "Gagal membuat order/reservasi.");
+      setNotice(msg);
     }
   };
 

@@ -9,9 +9,10 @@ from core_utils import new_id, now_iso, safe_doc, DEFAULT_ENTITY_ID
 from schemas import GenericPatch, SalesOrderCreate, AllocationPreviewIn
 from services.inventory_service import expire_old_reservations
 from services.roll_service import (
-    allocate_and_reserve_rolls, release_order_rolls, set_order_rolls_status
+    allocate_and_reserve_rolls, release_order_rolls, set_order_rolls_status,
+    preview_line_allocation,
 )
-from services.config_service import compute_order_pricing, evaluate_approval, role_satisfies
+from services.config_service import compute_order_pricing, evaluate_approval, role_satisfies, get_allocation_policy
 from services.fulfillment_service import classify_lines
 from routers.price_approvals import get_effective_special_price
 
@@ -39,6 +40,48 @@ async def preview_allocation(payload: AllocationPreviewIn, request: Request) -> 
     return await classify_lines(items, entity_id)
 
 
+@router.post("/sales-orders/preview-lots")
+async def preview_lots(payload: AllocationPreviewIn, request: Request) -> Dict[str, Any]:
+    """Mixed-Lot Confirmation (READ-ONLY) — rencana LOT per baris sebelum order dibuat.
+
+    Menerapkan allocation policy aktif (system→customer). Untuk tiap baris mengembalikan
+    lot_mode (single/mixed), lot yang dipakai, qty terpenuhi/backorder, penjelasan, dan
+    `requires_confirmation` (true bila kebijakan prefer_single tapi hasil lintas-lot).
+    Tidak memutasi stok. Dipakai POS untuk dialog konfirmasi mixed-lot.
+    """
+    await require_permission(request, "order", "view")
+    entity_id = (payload.entity_id or "").strip()
+    customer = None
+    if payload.customer_id:
+        customer = await db.customers.find_one({"id": payload.customer_id}, {"_id": 0})
+        if not entity_id:
+            entity_id = (customer or {}).get("entity_id") or DEFAULT_ENTITY_ID
+    if not entity_id:
+        entity_id = DEFAULT_ENTITY_ID
+    city = ""
+    if customer:
+        addrs = customer.get("addresses") or []
+        city = (addrs[0].get("city") if addrs else "") or customer.get("city", "")
+    policy = await get_allocation_policy(entity_id, customer)
+    prod_names = {p["id"]: p.get("name", p["id"]) for p in await db.products.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)}
+
+    lines = []
+    requires_any = False
+    for it in payload.items:
+        plan = await preview_line_allocation(it.product_id, it.quantity, city, entity_id, policy,
+                                             customer_id=payload.customer_id)
+        plan["product_name"] = prod_names.get(it.product_id, it.product_id)
+        requires_any = requires_any or plan["requires_confirmation"]
+        lines.append(plan)
+    return {
+        "entity_id": entity_id,
+        "policy": {"lot_mode": policy.get("lot_mode"), "lot_selection": policy.get("lot_selection"),
+                   "location_pref": policy.get("location_pref")},
+        "requires_confirmation": requires_any,
+        "lines": lines,
+    }
+
+
 def _norm_backorder(o: Dict[str, Any]) -> Dict[str, Any]:
     """Pastikan field backorder (Sub-fase 1.6) selalu ada di respons SO — jaga
     kontrak FE↔BE konsisten untuk order lama yang dibuat sebelum fitur backorder."""
@@ -46,6 +89,8 @@ def _norm_backorder(o: Dict[str, Any]) -> Dict[str, Any]:
         return o
     o.setdefault("has_backorder", False)
     o.setdefault("backorders", [])
+    o.setdefault("has_mixed_lot", False)
+    o.setdefault("allocation_policy", {})
     return o
 
 
@@ -168,17 +213,43 @@ async def create_order(payload: SalesOrderCreate, request: Request) -> Dict[str,
     # Fase 1B — kebutuhan approval dinamis dari approval_rules (basis grand_total)
     appr = await evaluate_approval("sales_order", pricing["grand_total"], entity_id)
     order_id = new_id("so")
+    # Sub-fase 1.7 — resolve allocation policy (system→customer→order override)
+    alloc_policy = await get_allocation_policy(entity_id, customer)
+    # Mixed-Lot Confirmation gate: bila kebijakan prefer_single tapi hasil lintas-lot,
+    # tolak (409 terstruktur) kecuali user sudah konfirmasi (confirm_mixed_lot=true).
+    if not payload.confirm_mixed_lot:
+        mixed_items: List[Dict[str, Any]] = []
+        for item in items:
+            prev = await preview_line_allocation(
+                item["product_id"], item["quantity"], customer_city, entity_id, alloc_policy,
+                customer_id=payload.customer_id)
+            if prev.get("requires_confirmation"):
+                mixed_items.append({
+                    "product_id": item["product_id"],
+                    "product_name": item.get("product_name") or item.get("name", item["product_id"]),
+                    "lots_used": prev.get("lots_used", []),
+                    "reserved_qty": prev.get("reserved_qty", 0),
+                    "backorder_qty": prev.get("backorder_qty", 0),
+                    "explanation": prev.get("explanation", ""),
+                })
+        if mixed_items:
+            raise HTTPException(status_code=409, detail={
+                "code": "MIXED_LOT_CONFIRMATION_REQUIRED",
+                "message": "Pesanan akan dipenuhi dari beberapa lot berbeda. Konfirmasi diperlukan.",
+                "mixed_items": mixed_items,
+            })
     # Multi-item reservation di LEVEL ROLL (owner-scoped = entitas penjual; KN_15)
     # Sub-fase 1.6 — bila allow_backorder: reservasi parsial + sisa jadi backorder.
     all_allocations: List[Dict[str, Any]] = []
     backorders: List[Dict[str, Any]] = []
     is_split = False
     has_backorder = False
+    has_mixed_lot = False
     try:
         for item in items:
             allocs = await allocate_and_reserve_rolls(
                 item["product_id"], item["quantity"], customer_city, entity_id, order_id,
-                allow_partial=payload.allow_backorder,
+                allow_partial=payload.allow_backorder, policy=alloc_policy, customer_id=payload.customer_id,
             )
             reserved_qty = round(sum(float(a.get("quantity", 0) or 0) for a in allocs), 2)
             backorder_qty = round(float(item["quantity"]) - reserved_qty, 2)
@@ -189,6 +260,9 @@ async def create_order(payload: SalesOrderCreate, request: Request) -> Dict[str,
             item["backorder_qty"] = backorder_qty
             if len(allocs) > 1:
                 is_split = True
+            item_lots = {l for a in allocs for l in (a.get("lots") or []) if l}
+            if len(item_lots) > 1:
+                has_mixed_lot = True
             all_allocations.extend(allocs)
             if backorder_qty > 0.01:
                 has_backorder = True
@@ -255,6 +329,14 @@ async def create_order(payload: SalesOrderCreate, request: Request) -> Dict[str,
         "allow_backorder": payload.allow_backorder,
         "has_backorder": has_backorder,
         "backorders": backorders,
+        # Sub-fase 1.7 — allocation policy snapshot + mixed-lot flag (CLARITY/audit)
+        "allocation_policy": {
+            "mode": alloc_policy.get("mode"),
+            "lot_mode": alloc_policy.get("lot_mode"),
+            "lot_selection": alloc_policy.get("lot_selection"),
+            "location_pref": alloc_policy.get("location_pref"),
+        },
+        "has_mixed_lot": has_mixed_lot,
         "created_at": now_iso(), "updated_at": now_iso()
     }
     await db.sales_orders.insert_one(order)

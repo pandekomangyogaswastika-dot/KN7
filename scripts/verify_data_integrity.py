@@ -474,6 +474,52 @@ async def layer_roll_invariants(db):
         results["pass"] += 1
         line("PASS", G, "order: alokasi owner-scoped (owner == SO.entity_id) — D3 terpenuhi")
 
+    # INV-LOT-1 (Sub-fase 1.7): konsistensi lot_mode per-alokasi & has_mixed_lot per-order.
+    # Defensif: hanya cek alokasi yang punya field lot_mode (order pra-1.7 dilewati).
+    lot_viol = []
+    mixed_viol = []
+    for o in orders:
+        order_lots = set()
+        has_lotmode_field = False
+        for a in o.get("allocations", []):
+            lm = a.get("lot_mode")
+            lots = [l for l in (a.get("lots") or []) if l]
+            order_lots.update(lots)
+            if lm is None:
+                continue
+            has_lotmode_field = True
+            if lm == "single" and len(lots) > 1:
+                lot_viol.append(o.get("number", o.get("id")))
+            if lm == "mixed" and len(lots) < 2:
+                lot_viol.append(o.get("number", o.get("id")))
+        # has_mixed_lot harus true bila >1 lot dipakai lintas alokasi (per order)
+        if has_lotmode_field and "has_mixed_lot" in o:
+            expect_mixed = len(order_lots) > 1
+            if bool(o.get("has_mixed_lot")) != expect_mixed:
+                mixed_viol.append(o.get("number", o.get("id")))
+    if lot_viol:
+        results["fail"] += 1
+        line("FAIL", R, f"order: {len(lot_viol)} alokasi lot_mode tak konsisten (single>1 lot / mixed<2 lot)", str(lot_viol[:5]))
+    else:
+        results["pass"] += 1
+        line("PASS", G, "order: alokasi lot_mode konsisten (single≤1 lot, mixed≥2 lot) — Sub-fase 1.7")
+    if mixed_viol:
+        results["fail"] += 1
+        line("FAIL", R, f"order: {len(mixed_viol)} SO has_mixed_lot tak cocok lot dipakai", str(mixed_viol[:5]))
+    else:
+        results["pass"] += 1
+        line("PASS", G, "order: has_mixed_lot ⟺ >1 lot dipakai (lintas alokasi) — Sub-fase 1.7")
+
+    # INV-PEG (Pegging/Earmark): roll yang di-pegging WAJIB berstatus 'available'.
+    peg_viol = [r.get("roll_no", r.get("id")) for r in rolls
+                if r.get("earmarked_for") and r.get("status") != "available"]
+    if peg_viol:
+        results["fail"] += 1
+        line("FAIL", R, f"roll: {len(peg_viol)} roll di-pegging tapi status != available", str(peg_viol[:5]))
+    else:
+        results["pass"] += 1
+        line("PASS", G, "roll: earmarked_for terisi ⟹ status 'available' (Pegging) — konsisten")
+
 
 async def layer_backorder_invariants(db):
     """Sub-fase 1.6 — Invarian Backorder Lifecycle.

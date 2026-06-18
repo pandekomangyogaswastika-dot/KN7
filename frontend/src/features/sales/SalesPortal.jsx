@@ -40,6 +40,8 @@ export function SalesPortal({
   // Sub-fase 1.4 — preview ATP & Fulfillment Mode per item (READ-ONLY, debounced).
   const [allocation, setAllocation] = useState({ map: {}, loading: false, entityId: "" });
   const [transferRequests, setTransferRequests] = useState({});
+  // Sub-fase 1.7 — rencana LOT per item (mixed-lot confirmation), debounced.
+  const [lotPlan, setLotPlan] = useState({ requires_confirmation: false, lines: [], policy: {}, loading: false });
   // Sub-fase 1.7 — harga khusus disetujui per item (auto-apply di POS), debounced.
   const [specialMap, setSpecialMap] = useState({});
   useEffect(() => {
@@ -92,7 +94,35 @@ export function SalesPortal({
     return () => { cancelled = true; clearTimeout(timer); };
   }, [cart, selectedEntity, selectedCustomer]);
 
-  // Sub-fase 1.5 — minta transfer antar-entitas (B→E) dari preview POS.
+  // Sub-fase 1.7 — preview rencana LOT (mixed-lot confirmation), debounced & READ-ONLY.
+  useEffect(() => {
+    if (!cart.length || !selectedCustomer?.id) {
+      setLotPlan({ requires_confirmation: false, lines: [], policy: {}, loading: false });
+      return undefined;
+    }
+    let cancelled = false;
+    setLotPlan((lp) => ({ ...lp, loading: true }));
+    const timer = setTimeout(async () => {
+      try {
+        const entity_id = selectedEntity && selectedEntity !== "all" ? selectedEntity : (selectedCustomer?.entity_id || "");
+        const res = await axios.post(`${API}/sales-orders/preview-lots`, {
+          entity_id,
+          customer_id: selectedCustomer?.id || "",
+          items: cart.map((i) => ({ product_id: i.product.id, quantity: i.quantity, unit: i.unit })),
+        });
+        if (cancelled) return;
+        setLotPlan({
+          requires_confirmation: !!res.data.requires_confirmation,
+          lines: res.data.lines || [],
+          policy: res.data.policy || {},
+          loading: false,
+        });
+      } catch (e) {
+        if (!cancelled) setLotPlan({ requires_confirmation: false, lines: [], policy: {}, loading: false });
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [cart, selectedEntity, selectedCustomer]);
   const handleRequestTransfer = async (line) => {
     const source = (line.cross_entity || [])[0];
     const destEntity =
@@ -187,6 +217,8 @@ export function SalesPortal({
           transferRequests={transferRequests}
           onRequestTransfer={handleRequestTransfer}
           specialPrices={specialMap}
+          lotPlan={lotPlan}
+          lotPlanLoading={lotPlan.loading}
         />
       </aside>
     </div>

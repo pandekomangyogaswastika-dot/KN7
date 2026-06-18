@@ -1,24 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import axios, { API } from "../../services/apiClient";
-import {
-  BadgePercent, RefreshCw, Search, Plus, Check, X, Send, Paperclip,
-  Trash2, Eye, Clock3, CheckCircle2, XCircle, Pencil,
-} from "lucide-react";
-import { formatCurrency, formatQty } from "../../utils/formatters";
-
-/**
- * Approval Harga Khusus (Sub-fase 1.7 — Special Price / Approval Harga).
- * Sales mengajukan harga nego per customer+product → upload bukti → manager/admin
- * approve/reject. Harga disetujui dipakai otomatis di POS (override harga normal).
- * Koleksi: price_approvals (pra_). Respons BE = bare object/array.
- */
-
-const STATUS_META = {
-  draft: { label: "Draft", icon: Pencil },
-  pending: { label: "Menunggu", icon: Clock3 },
-  approved: { label: "Disetujui", icon: CheckCircle2 },
-  rejected: { label: "Ditolak", icon: XCircle },
-};
+import { BadgePercent, RefreshCw, Search, Plus } from "lucide-react";
+import { PriceApprovalForm } from "./priceApprovals/PriceApprovalForm";
+import { PriceApprovalCard } from "./priceApprovals/PriceApprovalCard";
 
 const FILTERS = [
   { id: "all", label: "Semua" },
@@ -28,8 +12,22 @@ const FILTERS = [
   { id: "draft", label: "Draft" },
 ];
 
-const EMPTY_FORM = { customer_id: "", product_id: "", requested_price: "", min_quantity: "", valid_until: "", reason: "" };
+const EMPTY_FORM = {
+  customer_id: "",
+  product_id: "",
+  requested_price: "",
+  min_quantity: "",
+  valid_until: "",
+  reason: "",
+};
 
+/**
+ * Approval Harga Khusus (Sub-fase 1.7 — Special Price / Approval Harga).
+ * Sales mengajukan harga nego per customer+product → upload bukti → manager/admin
+ * approve/reject. Harga disetujui dipakai otomatis di POS (override harga normal).
+ * Koleksi: price_approvals (pra_). Respons BE = bare object/array.
+ * Sub-komponen di ./priceApprovals/ (Form + Card) agar file < 500 baris (compliance).
+ */
 export default function PriceApprovals({ currentUser = {} }) {
   const role = (currentUser.role || "").toLowerCase();
   const canApprove = ["manager", "admin"].includes(role);
@@ -77,11 +75,6 @@ export default function PriceApprovals({ currentUser = {} }) {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
-
-  const selectedProduct = useMemo(
-    () => products.find((p) => p.id === form.product_id),
-    [products, form.product_id],
-  );
 
   const resetForm = () => { setForm(EMPTY_FORM); setEditId(""); setShowForm(false); setFormErr(""); };
 
@@ -207,8 +200,6 @@ export default function PriceApprovals({ currentUser = {} }) {
     }
   };
 
-  const isEditable = (r) => ["draft", "pending"].includes(r.status);
-
   const filtered = useMemo(() => rows.filter((r) => {
     if (filter !== "all" && r.status !== filter) return false;
     const hay = `${r.customer_name} ${r.product_name} ${r.sku}`.toLowerCase();
@@ -270,105 +261,18 @@ export default function PriceApprovals({ currentUser = {} }) {
         </div>
       </section>
 
-      {/* Form ajukan / edit */}
       {showForm && (
-        <section data-testid="price-approvals-form" className="section-card p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-[13px] font-bold text-[#1C1C1E]">{editId ? "Edit Pengajuan Harga" : "Ajukan Harga Khusus"}</h3>
-            <button className="icon-button" onClick={resetForm} aria-label="Tutup"><X size={14} /></button>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73]">
-              Customer
-              <select
-                data-testid="price-approvals-customer"
-                className="field"
-                disabled={!!editId}
-                value={form.customer_id}
-                onChange={(e) => setForm({ ...form, customer_id: e.target.value })}
-              >
-                <option value="">— Pilih Customer —</option>
-                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </label>
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73]">
-              Produk
-              <select
-                data-testid="price-approvals-product"
-                className="field"
-                disabled={!!editId}
-                value={form.product_id}
-                onChange={(e) => setForm({ ...form, product_id: e.target.value })}
-              >
-                <option value="">— Pilih Produk —</option>
-                {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}
-              </select>
-            </label>
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73]">
-              Harga Khusus / unit
-              {selectedProduct && (
-                <span className="text-[10px] font-normal text-[#8E8E93]">Harga normal: {formatCurrency(selectedProduct.price)}</span>
-              )}
-              <input
-                data-testid="price-approvals-price"
-                type="number" min="0" className="field tabular-nums"
-                placeholder="cth: 150000"
-                value={form.requested_price}
-                onChange={(e) => setForm({ ...form, requested_price: e.target.value })}
-              />
-            </label>
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73]">
-              Qty Minimum
-              <input
-                data-testid="price-approvals-minqty"
-                type="number" min="0" className="field tabular-nums"
-                placeholder="0"
-                value={form.min_quantity}
-                onChange={(e) => setForm({ ...form, min_quantity: e.target.value })}
-              />
-            </label>
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73]">
-              Berlaku Sampai (opsional)
-              <input
-                data-testid="price-approvals-validuntil"
-                type="date" className="field"
-                value={form.valid_until}
-                onChange={(e) => setForm({ ...form, valid_until: e.target.value })}
-              />
-            </label>
-            <label className="grid gap-1 text-[11px] font-semibold text-[#6B6B73] sm:col-span-2">
-              Alasan / Catatan
-              <textarea
-                data-testid="price-approvals-reason"
-                className="field min-h-[56px] text-[12px]"
-                placeholder="Konteks negosiasi harga…"
-                value={form.reason}
-                onChange={(e) => setForm({ ...form, reason: e.target.value })}
-              />
-            </label>
-          </div>
-          {formErr && <p data-testid="price-approvals-form-error" className="mt-2 text-[11px] font-semibold text-[#A8221A]">{formErr}</p>}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              data-testid="price-approvals-save"
-              disabled={busyId === "form"}
-              onClick={() => submitForm(false)}
-              className="rounded-md border border-[#E5E5EA] px-4 py-1.5 text-[12px] font-semibold text-[#3C3C43] disabled:opacity-50"
-            >
-              {editId ? "Simpan Perubahan" : "Simpan sebagai Draft"}
-            </button>
-            {!editId && (
-              <button
-                data-testid="price-approvals-save-submit"
-                disabled={busyId === "form"}
-                onClick={() => submitForm(true)}
-                className="flex items-center gap-1.5 rounded-md bg-[#6B219A] px-4 py-1.5 text-[12px] font-bold text-white disabled:opacity-50"
-              >
-                <Send size={13} /> Ajukan untuk Approval
-              </button>
-            )}
-          </div>
-        </section>
+        <PriceApprovalForm
+          editId={editId}
+          form={form}
+          setForm={setForm}
+          formErr={formErr}
+          busyId={busyId}
+          customers={customers}
+          products={products}
+          onClose={resetForm}
+          onSubmit={submitForm}
+        />
       )}
 
       {error && (
@@ -388,170 +292,27 @@ export default function PriceApprovals({ currentUser = {} }) {
             Belum ada pengajuan harga khusus.
           </div>
         )}
-        {!loading && filtered.map((r) => {
-          const meta = STATUS_META[r.status] || { label: r.status, icon: Clock3 };
-          const StatusIcon = meta.icon;
-          const editable = isEditable(r);
-          const attachments = r.attachments || [];
-          return (
-            <article key={r.id} data-testid={`price-approvals-card-${r.id}`} className="section-card p-0 overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFF0F2] bg-[#FAFBFC] px-4 py-2.5">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="truncate text-[12.5px] font-bold text-[#1C1C1E]">{r.customer_name}</span>
-                  <span className="text-[#C7C7CC]">·</span>
-                  <span className="text-[10px] font-bold uppercase text-[#0058CC]">{r.sku}</span>
-                  <span className="truncate text-[12px] text-[#3C3C43]">{r.product_name}</span>
-                </div>
-                <span className={`status-pill status-${r.status}`} data-testid={`price-approvals-status-${r.id}`}>
-                  <StatusIcon size={11} /> {meta.label}
-                  {r.is_expired && <span className="ml-1 text-[9px] text-[#A8221A]">(kadaluarsa)</span>}
-                </span>
-              </div>
-
-              <div className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_auto]">
-                <div className="grid gap-1.5">
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px]">
-                    <span className="text-[#8E8E93] line-through tabular-nums">{formatCurrency(r.normal_price)}</span>
-                    <span className="font-bold text-[#6B219A] tabular-nums" data-testid={`price-approvals-price-${r.id}`}>{formatCurrency(r.requested_price)}</span>
-                    <span className="rounded-full bg-[#F3E9FA] px-2 py-0.5 text-[10px] font-bold text-[#6B219A]">−{formatQty(r.discount_percent)}%</span>
-                    {r.min_quantity > 0 && <span className="text-[11px] text-[#6B6B73]">min {formatQty(r.min_quantity)} {r.unit}</span>}
-                  </div>
-                  {r.reason && <p className="text-[11.5px] text-[#6B6B73]">{r.reason}</p>}
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10.5px] text-[#8E8E93]">
-                    <span>Pengaju: <span className="font-medium text-[#3C3C43]">{r.requested_by_name || "—"}</span></span>
-                    {r.valid_until && <span>Berlaku s/d: <span className="font-medium text-[#3C3C43]">{(r.valid_until || "").slice(0, 10)}</span></span>}
-                    {r.approved_by_name && <span>{r.status === "rejected" ? "Ditolak" : "Disetujui"}: <span className="font-medium text-[#3C3C43]">{r.approved_by_name}</span></span>}
-                  </div>
-                  {r.decision_notes && (
-                    <p className={`text-[11px] ${r.status === "rejected" ? "text-[#A8221A]" : "text-[#126E2C]"}`}>Catatan: {r.decision_notes}</p>
-                  )}
-
-                  {/* Lampiran bukti */}
-                  {attachments.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {attachments.map((att) => (
-                        <span key={att.id} data-testid={`price-approvals-att-${att.id}`} className="flex items-center gap-1 rounded-md border border-[#E5E5EA] bg-white px-2 py-1 text-[10.5px] text-[#3C3C43]">
-                          <Paperclip size={11} className="text-[#6B219A]" />
-                          <button className="max-w-[140px] truncate hover:underline" onClick={() => viewAttachment(r.id, att)} data-testid={`price-approvals-att-view-${att.id}`}>
-                            {att.original_filename}
-                          </button>
-                          <button onClick={() => viewAttachment(r.id, att)} aria-label="Lihat" className="text-[#0058CC]"><Eye size={11} /></button>
-                          {editable && (
-                            <button onClick={() => deleteAttachment(r.id, att.id)} aria-label="Hapus lampiran" className="text-[#A8221A]"><Trash2 size={11} /></button>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Aksi */}
-                <div className="flex flex-col items-stretch gap-1.5 sm:min-w-[180px]">
-                  {editable && (
-                    <>
-                      <input
-                        ref={(el) => (fileInputs.current[r.id] = el)}
-                        type="file" accept="image/*,application/pdf" className="hidden"
-                        data-testid={`price-approvals-file-${r.id}`}
-                        onChange={(e) => { uploadFile(r.id, e.target.files?.[0]); e.target.value = ""; }}
-                      />
-                      <button
-                        data-testid={`price-approvals-upload-${r.id}`}
-                        disabled={busyId === r.id}
-                        onClick={() => fileInputs.current[r.id]?.click()}
-                        className="flex items-center justify-center gap-1.5 rounded-md border border-[#E5E5EA] px-3 py-1.5 text-[11.5px] font-semibold text-[#3C3C43] disabled:opacity-50"
-                      >
-                        <Paperclip size={13} /> Upload Bukti
-                      </button>
-                    </>
-                  )}
-
-                  {r.status === "draft" && (
-                    <button
-                      data-testid={`price-approvals-submit-${r.id}`}
-                      disabled={busyId === r.id}
-                      onClick={() => submitApproval(r.id)}
-                      className="flex items-center justify-center gap-1.5 rounded-md bg-[#6B219A] px-3 py-1.5 text-[11.5px] font-bold text-white disabled:opacity-50"
-                    >
-                      <Send size={13} /> Submit
-                    </button>
-                  )}
-
-                  {r.status === "pending" && canApprove && decideFor !== `${r.id}:reject` && (
-                    <button
-                      data-testid={`price-approvals-approve-${r.id}`}
-                      disabled={busyId === r.id}
-                      onClick={() => { setDecideFor(`${r.id}:approve`); setDecisionNotes(""); }}
-                      className="flex items-center justify-center gap-1.5 rounded-md bg-[#126E2C] px-3 py-1.5 text-[11.5px] font-bold text-white disabled:opacity-50"
-                    >
-                      <Check size={13} /> Approve
-                    </button>
-                  )}
-                  {r.status === "pending" && canApprove && decideFor !== `${r.id}:approve` && (
-                    <button
-                      data-testid={`price-approvals-reject-${r.id}`}
-                      disabled={busyId === r.id}
-                      onClick={() => { setDecideFor(`${r.id}:reject`); setDecisionNotes(""); }}
-                      className="flex items-center justify-center gap-1.5 rounded-md border border-[#E5E5EA] px-3 py-1.5 text-[11.5px] font-semibold text-[#A8221A] disabled:opacity-50"
-                    >
-                      <X size={13} /> Tolak
-                    </button>
-                  )}
-
-                  {editable && (
-                    <div className="flex gap-1.5">
-                      <button
-                        data-testid={`price-approvals-edit-${r.id}`}
-                        onClick={() => openEdit(r)}
-                        className="flex flex-1 items-center justify-center gap-1 rounded-md border border-[#E5E5EA] px-2 py-1.5 text-[11px] font-semibold text-[#3C3C43]"
-                      >
-                        <Pencil size={12} /> Edit
-                      </button>
-                      <button
-                        data-testid={`price-approvals-delete-${r.id}`}
-                        disabled={busyId === r.id}
-                        onClick={() => removeApproval(r.id)}
-                        className="flex flex-1 items-center justify-center gap-1 rounded-md border border-[#E5E5EA] px-2 py-1.5 text-[11px] font-semibold text-[#A8221A] disabled:opacity-50"
-                      >
-                        <Trash2 size={12} /> Hapus
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Panel keputusan (notes) */}
-              {decideFor.startsWith(`${r.id}:`) && (
-                <div className="border-t border-[#EFF0F2] bg-[#FAFBFC] px-4 py-3">
-                  <textarea
-                    data-testid={`price-approvals-notes-${r.id}`}
-                    className="field min-h-[52px] w-full text-[12px]"
-                    placeholder={decideFor.endsWith("approve") ? "Catatan persetujuan (opsional)…" : "Alasan penolakan…"}
-                    value={decisionNotes}
-                    onChange={(e) => setDecisionNotes(e.target.value)}
-                  />
-                  <div className="mt-2 flex gap-2">
-                    <button
-                      data-testid={`price-approvals-confirm-${r.id}`}
-                      disabled={busyId === r.id}
-                      onClick={() => (decideFor.endsWith("approve") ? approveApproval(r.id, decisionNotes) : rejectApproval(r.id, decisionNotes))}
-                      className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-bold text-white disabled:opacity-50 ${decideFor.endsWith("approve") ? "bg-[#126E2C]" : "bg-[#A8221A]"}`}
-                    >
-                      {decideFor.endsWith("approve") ? <Check size={13} /> : <X size={13} />}
-                      {busyId === r.id ? "Memproses…" : decideFor.endsWith("approve") ? "Konfirmasi Setujui" : "Konfirmasi Tolak"}
-                    </button>
-                    <button
-                      onClick={() => { setDecideFor(""); setDecisionNotes(""); }}
-                      className="rounded-md border border-[#E5E5EA] px-3 py-1.5 text-[12px] font-semibold text-[#3C3C43]"
-                    >
-                      Batal
-                    </button>
-                  </div>
-                </div>
-              )}
-            </article>
-          );
-        })}
+        {!loading && filtered.map((r) => (
+          <PriceApprovalCard
+            key={r.id}
+            r={r}
+            canApprove={canApprove}
+            busyId={busyId}
+            decideFor={decideFor}
+            setDecideFor={setDecideFor}
+            decisionNotes={decisionNotes}
+            setDecisionNotes={setDecisionNotes}
+            fileInputs={fileInputs}
+            onUpload={uploadFile}
+            onSubmit={submitApproval}
+            onApprove={approveApproval}
+            onReject={rejectApproval}
+            onEdit={openEdit}
+            onRemove={removeApproval}
+            onViewAttachment={viewAttachment}
+            onDeleteAttachment={deleteAttachment}
+          />
+        ))}
       </section>
     </div>
   );
